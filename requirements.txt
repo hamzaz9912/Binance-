@@ -1,7 +1,6 @@
 streamlit
-yfinance
 pandas
-matplotlib
-plotly
 prophet
-numpy==2.0.0
+matplotlib
+python-binance
+numpy

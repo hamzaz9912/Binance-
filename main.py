@@ -6,13 +6,12 @@ from datetime import datetime, timedelta
 from binance.client import Client
 import numpy as np
 
-# 🔐 Binance API Keys (replace with your actual keys)
-api_key = 'ER4EJF1H7Z3HYPWBYQH8AXY2TRFARZ5P4Y'
-api_secret = 'paste_your_api_secret_here'
+# Load API keys from Streamlit secrets
+api_key = st.secrets["binance"]["api_key"]
+api_secret = st.secrets["binance"]["api_secret"]
 
 # Initialize Binance Client
 client = Client(api_key, api_secret)
-
 
 # Fetch all USDT trading pairs
 @st.cache_data(ttl=3600)
@@ -21,7 +20,6 @@ def get_usdt_pairs():
     symbols = exchange_info['symbols']
     usdt_pairs = [s['symbol'] for s in symbols if s['quoteAsset'] == 'USDT' and s['status'] == 'TRADING']
     return sorted(usdt_pairs)
-
 
 # Fetch historical candle data
 def fetch_historical_data(symbol, interval='1h', lookback='2 days ago UTC'):
@@ -41,7 +39,6 @@ def fetch_historical_data(symbol, interval='1h', lookback='2 days ago UTC'):
         st.error(f"Error fetching data for {symbol}: {e}")
         return pd.DataFrame()
 
-
 # Forecast using Prophet
 def forecast_crypto(df, periods=24, freq='H'):
     model = Prophet(daily_seasonality=True)
@@ -49,7 +46,6 @@ def forecast_crypto(df, periods=24, freq='H'):
     future = model.make_future_dataframe(periods=periods, freq=freq)
     forecast = model.predict(future)
     return forecast
-
 
 def main():
     st.set_page_config(page_title="📈 Live Crypto Dashboard", layout="wide")
@@ -61,7 +57,6 @@ def main():
     selected_pair = st.sidebar.selectbox("Select Crypto Pair", coin_pairs, index=coin_pairs.index('BTCUSDT'))
 
     forecast_mode = st.sidebar.radio("Forecast Mode", ["Live (Next 1 Hour)", "Future Date"])
-
     if forecast_mode == "Future Date":
         forecast_date = st.sidebar.date_input("Select Date", min_value=datetime.today(),
                                               max_value=datetime.today() + timedelta(days=7))
@@ -109,7 +104,6 @@ def main():
         'yhat_lower': 'Lower Bound',
         'yhat_upper': 'Upper Bound'
     }))
-
 
 if __name__ == "__main__":
     main()
