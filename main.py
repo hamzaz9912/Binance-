@@ -4,23 +4,33 @@ import plotly.graph_objs as go
 from prophet import Prophet
 from binance.client import Client
 from datetime import datetime, timedelta
-import time
 import threading
 import queue
 from websocket import WebSocketApp
 import json
 
-st.set_page_config(layout="wide")
+# -------------------------------
+# Initialization
+# -------------------------------
+st.set_page_config(page_title="📈 Crypto Forecast Pro", layout="wide")
+
+
+# Initialize Binance client
+@st.cache_resource
+def init_binance_client():
+    try:
+        client = Client(st.secrets["binance"]["api_key"], st.secrets["binance"]["api_secret"])
+        client.ping()
+        return client
+    except Exception as e:
+        st.error(f"Connection error: {e}")
+        return None
+
+
+client = init_binance_client()
 
 # -------------------------------
-# API Setup
-# -------------------------------
-api_key = "VKuSdnSh1LK2apOk0dSaRHPvgoNcv2DpzL205A1MgA2KksTRV6FtfbPKQa4Vzq4z"
-api_secret = "E6xR3mJDdknnmL2VDftz1sBpDFIUZ1EaREr6Nf14PYQ3vcg2fMNoIUNQrGZ03joo"
-client = Client(api_key, api_secret)
-
-# -------------------------------
-# WebSocket Setup for Live Data
+# WebSocket Management
 # -------------------------------
 price_queue = queue.Queue()
 
@@ -28,155 +38,215 @@ price_queue = queue.Queue()
 def on_message(ws, message):
     data = json.loads(message)
     if 'p' in data:
-        price = data['p']
+        price = float(data['p'])
         timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-        price_queue.put((timestamp, float(price)))
+        price_queue.put((timestamp, price))
 
 
-def websocket_thread(symbol):
-    ws = WebSocketApp(f"wss://stream.binance.com:9443/ws/{symbol.lower()}@trade",
-                      on_message=on_message)
-    st.session_state.ws = ws  # Store WebSocket instance in session state
-    ws.run_forever()
-
-
-# -------------------------------
-# Initialize Session State
-# -------------------------------
-if 'ws' not in st.session_state:
-    st.session_state.ws = None
-if 'current_symbol' not in st.session_state:
-    st.session_state.current_symbol = None
+def manage_websocket(symbol):
+    if 'ws' in st.session_state and st.session_state.ws:
+        st.session_state.ws.close()
+    ws = WebSocketApp(f"wss://stream.binance.com:9443/ws/{symbol.lower()}@trade")
+    ws.on_message = on_message
+    st.session_state.ws = ws
+    threading.Thread(target=ws.run_forever, daemon=True).start()
 
 
 # -------------------------------
-# Get All USDT Trading Pairs
+# Data Functions
 # -------------------------------
 @st.cache_data(ttl=3600)
 def get_usdt_pairs():
-    exchange_info = client.get_exchange_info()
-    return [symbol['symbol'] for symbol in exchange_info['symbols']
-            if symbol['symbol'].endswith('USDT') and symbol['status'] == 'TRADING']
-
-
-# -------------------------------
-# Sidebar Controls
-# -------------------------------
-st.sidebar.title("📊 Crypto Dashboard")
-usdt_pairs = get_usdt_pairs()
-selected_symbol = st.sidebar.selectbox("🪙 Select a Coin", usdt_pairs)
-view_option = st.sidebar.radio("📌 Select View", ["Real-Time Prediction", "Future Forecast"])
-
-# -------------------------------
-# Manage WebSocket Connection
-# -------------------------------
-if st.session_state.current_symbol != selected_symbol:
-    # Close existing connection if it exists
-    if st.session_state.ws:
-        st.session_state.ws.close()
-        st.session_state.ws = None
-
-    # Start new WebSocket connection
-    st.session_state.current_symbol = selected_symbol
-    threading.Thread(
-        target=websocket_thread,
-        args=(selected_symbol,),
-        daemon=True
-    ).start()
-
-
-# -------------------------------
-# Data Processing
-# -------------------------------
-@st.cache_data
-def get_historical_data(symbol):
     try:
-        klines = client.get_historical_klines(symbol, Client.KLINE_INTERVAL_1HOUR, "2 days ago UTC")
-        return [[datetime.utcfromtimestamp(k[0] / 1000), float(k[4])] for k in klines]
-    except Exception as e:
-        st.error(f"Error fetching data for {symbol}: {str(e)}")
+        info = client.get_exchange_info()
+        return sorted([s['symbol'] for s in info['symbols']
+                       if s['quoteAsset'] == 'USDT' and s['status'] == 'TRADING'])
+    except:
         return []
 
 
-historical_data = get_historical_data(selected_symbol)
-live_data = []
-while not price_queue.empty():
-    live_data.append(price_queue.get())
-
-# Combine and process data
-combined_data = historical_data + [[datetime.strptime(d[0], "%Y-%m-%d %H:%M:%S"), d[1]] for d in live_data]
-df = pd.DataFrame(combined_data, columns=["ds", "y"]).drop_duplicates("ds").sort_values("ds")
-
-
-# -------------------------------
-# Prediction Views
-# -------------------------------
-def create_prediction_chart(df, periods, title):
-    model = Prophet()
-    model.fit(df)
-    future = model.make_future_dataframe(periods=periods, freq='H')
-    forecast = model.predict(future)
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], name='Prediction'))
-    fig.add_trace(go.Scatter(x=df['ds'], y=df['y'], name='Actual Price', line=dict(color='orange')))
-    fig.update_layout(title=title,
-                      xaxis_title="Time (UTC)",
-                      yaxis_title="Price (USD)",
-                      showlegend=True)
-    return fig
-
-
-if view_option == "Real-Time Prediction":
-    st.subheader(f"📈 Real-Time {selected_symbol} Price Prediction")
-    fig = create_prediction_chart(df, 12, f"Live {selected_symbol} Price Prediction")
-    st.plotly_chart(fig, use_container_width=True)
-
-elif view_option == "Future Forecast":
-    st.subheader(f"🔮 {selected_symbol} Price Forecast")
-    future_date = st.sidebar.date_input("📅 Select Future Date", min_value=datetime.today().date() + timedelta(days=1))
-    hours_ahead = int(((future_date - datetime.today().date()).days * 24))
-    fig = create_prediction_chart(df, hours_ahead, f"{selected_symbol} Price Forecast until {future_date}")
-    st.plotly_chart(fig, use_container_width=True)
-
-# -------------------------------
-# Market Data Table
-# -------------------------------
-st.subheader("📊 All USDT Trading Pairs on Binance")
-
-
 @st.cache_data(ttl=300)
-def get_market_data():
-    tickers = client.get_ticker_24hr()
-    df = pd.DataFrame(tickers)
-    usdt_df = df[df['symbol'].isin(usdt_pairs)][['symbol', 'lastPrice', 'priceChangePercent', 'volume']]
-    return usdt_df.sort_values('volume', ascending=False)
+def get_historical_data(symbol):
+    try:
+        klines = client.get_historical_klines(symbol, Client.KLINE_INTERVAL_1HOUR, "2 days ago UTC")
+        return pd.DataFrame([(datetime.utcfromtimestamp(k[0] / 1000), float(k[4]))
+                             for k in klines], columns=['ds', 'y'])
+    except:
+        return pd.DataFrame()
 
 
-market_data = get_market_data().rename(columns={
-    'symbol': 'Pair',
-    'lastPrice': 'Price',
-    'priceChangePercent': '24h Change',
-    'volume': 'Volume'
-})
+# -------------------------------
+# Forecasting Functions
+# -------------------------------
+def generate_forecast(data, hours_ahead):
+    try:
+        model = Prophet(daily_seasonality=True, weekly_seasonality=True)
+        model.fit(data)
+        future = model.make_future_dataframe(periods=hours_ahead, freq='H')
+        return model.predict(future)
+    except:
+        return pd.DataFrame()
 
-# Convert numeric values
-market_data[['Price', '24h Change', 'Volume']] = market_data[['Price', '24h Change', 'Volume']].apply(pd.to_numeric,
-                                                                                                      errors='coerce')
 
-# Add search and filtering
-search_query = st.text_input("🔍 Search Pair:")
-if search_query:
-    market_data = market_data[market_data['Pair'].str.contains(search_query.upper())]
+# -------------------------------
+# Main App
+# -------------------------------
+def main():
+    st.title("⏳ Multi-Timeframe Crypto Predictor")
 
-# Display formatted table
-st.dataframe(
-    market_data.style.format({
-        'Price': "{:.8f}",
-        '24h Change': "{:.2f}%",
-        'Volume': "${:,.2f}"
-    }).background_gradient(subset=['24h Change'], cmap='RdYlGn')
-    .bar(subset=['Volume'], color='#5fba7d'),
-    height=800,
-    use_container_width=True
-)
+    # Sidebar controls
+    st.sidebar.header("Configuration")
+    pairs = get_usdt_pairs()
+    selected_pair = st.sidebar.selectbox("Choose Asset", pairs, index=pairs.index('BTCUSDT'))
+
+    # WebSocket management
+    if 'current_pair' not in st.session_state or st.session_state.current_pair != selected_pair:
+        manage_websocket(selected_pair)
+        st.session_state.current_pair = selected_pair
+        price_queue.queue.clear()
+
+    # Get combined data
+    hist_data = get_historical_data(selected_pair)
+    live_data = []
+    while not price_queue.empty():
+        live_data.append(price_queue.get())
+
+    if live_data:
+        live_df = pd.DataFrame(live_data, columns=['ds', 'y'])
+        live_df['ds'] = pd.to_datetime(live_df['ds'])
+        combined_df = pd.concat([hist_data, live_df]).drop_duplicates('ds').sort_values('ds')
+    else:
+        combined_df = hist_data
+
+    # Real-time price display
+    current_price = combined_df['y'].iloc[-1] if not combined_df.empty else None
+    if current_price:
+        st.metric(f"💰 {selected_pair} Current Price", f"${current_price:.2f}",
+                  delta=f"{(current_price - combined_df['y'].iloc[-2]):.2f}"
+                  if len(combined_df) > 1 else "N/A")
+
+    # Forecast mode selection
+    st.sidebar.subheader("Forecast Settings")
+    forecast_mode = st.sidebar.radio("Forecast Type",
+                                     ["Next Hour", "Custom Date"])
+
+    if forecast_mode == "Custom Date":
+        min_date = datetime.now() + timedelta(hours=1)
+        max_date = datetime.now() + timedelta(days=14)
+        selected_date = st.sidebar.date_input("Select Target Date",
+                                              min_value=min_date,
+                                              max_value=max_date)
+        hours_ahead = int((selected_date - datetime.now().date()).days * 24)
+        hours_ahead += (23 - datetime.now().hour)  # Adjust for current hour
+    else:
+        hours_ahead = 1
+        selected_date = datetime.now() + timedelta(hours=1)
+
+    # Generate forecasts
+    if not combined_df.empty and st.sidebar.button("Generate Predictions"):
+        with st.spinner("Crunching numbers..."):
+            forecast_df = generate_forecast(combined_df, hours_ahead)
+            if not forecast_df.empty:
+                st.session_state.forecast = forecast_df
+                st.session_state.forecast_type = forecast_mode
+                st.session_state.target_date = selected_date
+
+    # Display results
+    if 'forecast' in st.session_state:
+        st.header(f"🔮 {forecast_mode} Forecast Results")
+
+        # Create main chart
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=combined_df['ds'], y=combined_df['y'],
+                                 name='Historical Data', line=dict(color='#636EFA')))
+        fig.add_trace(go.Scatter(x=st.session_state.forecast['ds'],
+                                 y=st.session_state.forecast['yhat'],
+                                 name='Predictions', line=dict(color='#FFA15A')))
+        fig.update_layout(
+            title=f"{selected_pair} Price Trajectory",
+            xaxis_title="Date/Time (UTC)",
+            yaxis_title="Price (USD)",
+            hovermode="x unified",
+            height=500
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Create forecast breakdown
+        st.subheader("📈 Forecast Breakdown")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("### Prediction Details")
+            latest_pred = st.session_state.forecast.iloc[-1]
+            current_time = datetime.now().strftime("%H:%M UTC")
+
+            if st.session_state.forecast_type == "Next Hour":
+                st.metric("Next Hour Prediction",
+                          f"${latest_pred['yhat']:.2f}",
+                          delta=f"{(latest_pred['yhat'] - current_price):.2f} from now")
+            else:
+                st.metric(f"{selected_date.strftime('%Y-%m-%d')} Prediction",
+                          f"${latest_pred['yhat']:.2f}",
+                          delta=f"{(latest_pred['yhat'] - current_price):.2f} projected change")
+
+        with col2:
+            st.markdown("### Confidence Range")
+            st.write(f"**95% Confidence Interval:**")
+            st.write(f"Lower Bound: ${latest_pred['yhat_lower']:.2f}")
+            st.write(f"Upper Bound: ${latest_pred['yhat_upper']:.2f}")
+            st.progress(0.95, text="Prediction Confidence")
+
+        # Detailed forecast table
+        st.subheader("📅 Hour-by-Hour Forecast")
+        forecast_display = st.session_state.forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(hours_ahead)
+        forecast_display['ds'] = forecast_display['ds'].dt.strftime('%Y-%m-%d %H:%M UTC')
+        st.dataframe(
+            forecast_display.style.format({
+                'yhat': '{:.2f}',
+                'yhat_lower': '{:.2f}',
+                'yhat_upper': '{:.2f}'
+            }).applymap(lambda x: 'color: #FFA15A', subset=['yhat']),
+            column_config={
+                'ds': 'Timestamp',
+                'yhat': 'Predicted Price',
+                'yhat_lower': 'Minimum Estimate',
+                'yhat_upper': 'Maximum Estimate'
+            },
+            use_container_width=True,
+            height=400
+        )
+
+    # Market overview
+    st.sidebar.subheader("Market Overview")
+    if st.sidebar.button("Refresh Market Data"):
+        st.cache_data.clear()
+
+    st.header("📊 All USDT Trading Pairs")
+    try:
+        tickers = pd.DataFrame(client.get_ticker_24hr())
+        market_data = tickers[tickers['symbol'].isin(pairs)][['symbol', 'lastPrice', 'priceChangePercent', 'volume']]
+        market_data.columns = ['Pair', 'Price', '24h Change', 'Volume']
+        market_data = market_data.sort_values('Volume', ascending=False)
+
+        # Search and filtering
+        search = st.text_input("🔍 Search pairs:")
+        if search:
+            market_data = market_data[market_data['Pair'].str.contains(search.upper())]
+
+        # Display formatted dataframe
+        st.dataframe(
+            market_data.style.format({
+                'Price': '{:.8f}',
+                '24h Change': '{+.2f}%',
+                'Volume': '${:,.2f}'
+            }).background_gradient(subset=['24h Change'], cmap='RdYlGn')
+            .bar(subset=['Volume'], color='#00CC96'),
+            height=600,
+            use_container_width=True
+        )
+    except:
+        st.error("Market data currently unavailable")
+
+
+if __name__ == "__main__":
+    main()
