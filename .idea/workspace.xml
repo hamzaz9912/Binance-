@@ -5,7 +5,7 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="208ace9f-1234-4161-abf0-bb49320b58c3" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/forex_app.py" beforeDir="false" afterPath="$PROJECT_DIR$/forex_app.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.streamlit/.gitignore" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
