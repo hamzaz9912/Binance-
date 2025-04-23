@@ -9,24 +9,41 @@ import numpy as np
 # Forex configuration
 FOREX_API_KEY = st.secrets.get("forex", {}).get("api_key", "demo")
 BASE_URL = "https://www.alphavantage.co/query"
-FOREX_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD"]
+
+# Added XAUUSD (Gold) as a new brand
+FOREX_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "XAUUSD"]
 
 
 def get_forex_data(pair):
-    """Fetch daily forex data with robust error handling"""
+    """Fetch daily data with proper function based on asset type."""
     try:
         if FOREX_API_KEY == "demo":
             st.warning("Using synthetic data - Add real API key in secrets.toml")
             return generate_synthetic_data()
 
-        params = {
-            "function": "FX_DAILY",
-            "from_symbol": pair[:3],
-            "to_symbol": pair[3:],
-            "apikey": FOREX_API_KEY,
-            "outputsize": "compact",
-            "datatype": "json"
-        }
+        base = pair[:3]
+        quote = pair[3:]
+
+        # Determine function
+        if pair in ["XAUUSD", "XAGUSD"]:
+            function = "TIME_SERIES_DAILY"
+            params = {
+                "function": function,
+                "symbol": pair,
+                "apikey": FOREX_API_KEY,
+                "outputsize": "compact",
+                "datatype": "json"
+            }
+        else:
+            function = "FX_DAILY"
+            params = {
+                "function": function,
+                "from_symbol": base,
+                "to_symbol": quote,
+                "apikey": FOREX_API_KEY,
+                "outputsize": "compact",
+                "datatype": "json"
+            }
 
         response = requests.get(BASE_URL, params=params, timeout=10)
         response.raise_for_status()
@@ -37,12 +54,13 @@ def get_forex_data(pair):
         if "Note" in data:
             raise Exception(f"Rate Limit: {data['Note']}")
 
-        time_series_key = next((k for k in data.keys() if "Time Series" in k), None)
+        # Parse time series
+        time_series_key = next((k for k in data if "Time Series" in k), None)
         if not time_series_key:
-            raise Exception("No time series data in response")
+            raise Exception("No time series data found in response.")
 
         df = pd.DataFrame(data[time_series_key]).T.reset_index()
-        df.columns = ['ds', 'open', 'high', 'low', 'close']
+        df.columns = ['ds', 'open', 'high', 'low', 'close', *df.columns[5:]]
         df['ds'] = pd.to_datetime(df['ds'])
         df['y'] = pd.to_numeric(df['close'])
         return df[['ds', 'y']].sort_values('ds')
@@ -60,7 +78,6 @@ def generate_synthetic_data():
     return pd.DataFrame({'ds': dates, 'y': prices})
 
 
-# ADDED MISSING FORECAST FUNCTION
 def generate_forex_forecast(data, periods=7):
     """Generate forecast using Prophet"""
     try:
@@ -81,7 +98,7 @@ def main():
         st.session_state.forex_data = pd.DataFrame()
 
     # Sidebar controls
-    selected_pair = st.sidebar.selectbox("Select Forex Pair", FOREX_PAIRS)
+    selected_pair = st.sidebar.selectbox("Select Forex/Commodity Pair", FOREX_PAIRS)
     forecast_days = st.sidebar.slider("Forecast Days", 1, 14, 7)
 
     # Load data
