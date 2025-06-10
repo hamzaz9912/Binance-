@@ -46,6 +46,7 @@ def on_message(ws, message):
 def manage_websocket(symbol):
     if 'ws' in st.session_state and st.session_state.ws:
         st.session_state.ws.close()
+    symbol = str(symbol)
     ws = WebSocketApp(f"wss://stream.binance.com:9443/ws/{symbol.lower()}@trade")
     ws.on_message = on_message
     st.session_state.ws = ws
