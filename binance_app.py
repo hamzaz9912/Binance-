@@ -227,6 +227,18 @@ def main():
     st.header("📊 Active USDT Trading Pairs")
     try:
         # Get 24-hour ticker data
+        @st.cache_resource
+        def init_binance_client():
+            try:
+                api_key = st.secrets["binance"]["api_key"]
+                api_secret = st.secrets["binance"]["api_secret"]
+                client = Client(api_key, api_secret)
+                client.ping()  # This will fail if credentials are wrong
+                return client
+            except Exception as e:
+                st.error(f"🚨 Binance API Connection Error: {e}")
+                return None
+
         tickers_24h = client.get_ticker()
         market_df = pd.DataFrame(tickers_24h)
 
