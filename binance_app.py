@@ -97,7 +97,8 @@ def main():
     # Sidebar controls
     st.sidebar.header("Configuration")
     pairs = get_usdt_pairs()
-    selected_pair = st.sidebar.selectbox("Choose Asset", pairs, index=pairs.index('BTCUSDT'))
+    default_index = pairs.index('BTCUSDT') if 'BTCUSDT' in pairs else 0
+    selected_pair = st.sidebar.selectbox("Choose Asset", pairs, index=default_index)
 
     # WebSocket management
     if 'current_pair' not in st.session_state or st.session_state.current_pair != selected_pair:
