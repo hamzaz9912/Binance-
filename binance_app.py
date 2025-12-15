@@ -8,6 +8,7 @@ import threading
 import queue
 from websocket import WebSocketApp
 import json
+import pytz
 
 # -------------------------------
 # Initialization
@@ -67,9 +68,9 @@ def get_usdt_pairs():
 
 
 @st.cache_data(ttl=300)
-def get_historical_data(symbol):
+def get_historical_data(symbol, interval):
     try:
-        klines = client.get_historical_klines(symbol, Client.KLINE_INTERVAL_1HOUR, "2 days ago UTC")
+        klines = client.get_historical_klines(symbol, interval, "2 days ago UTC")
         return pd.DataFrame([(datetime.utcfromtimestamp(k[0] / 1000), float(k[4]))
                              for k in klines], columns=['ds', 'y'])
     except:
@@ -79,11 +80,11 @@ def get_historical_data(symbol):
 # -------------------------------
 # Forecasting Functions
 # -------------------------------
-def generate_forecast(data, hours_ahead):
+def generate_forecast(data, periods, freq):
     try:
         model = Prophet(daily_seasonality=True, weekly_seasonality=True)
         model.fit(data)
-        future = model.make_future_dataframe(periods=hours_ahead, freq='H')
+        future = model.make_future_dataframe(periods=periods, freq=freq)
         return model.predict(future)
     except:
         return pd.DataFrame()
@@ -101,6 +102,17 @@ def main():
     default_index = pairs.index('BTCUSDT') if 'BTCUSDT' in pairs else 0
     selected_pair = st.sidebar.selectbox("Choose Asset", pairs, index=default_index)
 
+    # Time interval selection
+    interval_options = {
+        "5 Minutes": {"binance": Client.KLINE_INTERVAL_5MINUTE, "freq": "5min", "minutes": 5},
+        "15 Minutes": {"binance": Client.KLINE_INTERVAL_15MINUTE, "freq": "15min", "minutes": 15},
+        "1 Hour": {"binance": Client.KLINE_INTERVAL_1HOUR, "freq": "H", "minutes": 60},
+        "4 Hours": {"binance": Client.KLINE_INTERVAL_4HOUR, "freq": "4H", "minutes": 240},
+        "1 Day": {"binance": Client.KLINE_INTERVAL_1DAY, "freq": "D", "minutes": 1440}
+    }
+    selected_interval_label = st.sidebar.selectbox("Time Interval", list(interval_options.keys()), index=2)  # Default to 1 Hour
+    selected_interval = interval_options[selected_interval_label]
+
     # WebSocket management
     if 'current_pair' not in st.session_state or st.session_state.current_pair != selected_pair:
         manage_websocket(selected_pair)
@@ -108,7 +120,7 @@ def main():
         price_queue.queue.clear()
 
     # Get combined data
-    hist_data = get_historical_data(selected_pair)
+    hist_data = get_historical_data(selected_pair, selected_interval["binance"])
     live_data = []
     while not price_queue.empty():
         live_data.append(price_queue.get())
@@ -130,7 +142,7 @@ def main():
     # Forecast mode selection
     st.sidebar.subheader("Forecast Settings")
     forecast_mode = st.sidebar.radio("Forecast Type",
-                                     ["Next Hour", "Custom Date"])
+                                      ["Next Interval", "Custom Date"])
 
     if forecast_mode == "Custom Date":
         min_date = datetime.now() + timedelta(hours=1)
@@ -140,37 +152,54 @@ def main():
                                               max_value=max_date)
         hours_ahead = int((selected_date - datetime.now().date()).days * 24)
         hours_ahead += (23 - datetime.now().hour)  # Adjust for current hour
+        periods = int(hours_ahead * 60 / selected_interval["minutes"])
+        freq = selected_interval["freq"]
     else:
-        hours_ahead = 1
-        selected_date = datetime.now() + timedelta(hours=1)
+        periods = max(1, selected_interval["minutes"] // 5)
+        freq = '5min'
+        selected_date = datetime.now() + timedelta(minutes=selected_interval["minutes"])
 
     # Generate forecasts
     if not combined_df.empty and st.sidebar.button("Generate Predictions"):
         with st.spinner("Crunching numbers..."):
-            forecast_df = generate_forecast(combined_df, hours_ahead)
+            forecast_df = generate_forecast(combined_df, periods, freq)
             if not forecast_df.empty:
                 st.session_state.forecast = forecast_df
                 st.session_state.forecast_type = forecast_mode
                 st.session_state.target_date = selected_date
+                st.session_state.selected_interval = selected_interval_label
+                st.session_state.periods = periods
 
     # Display results
     if 'forecast' in st.session_state:
         st.header(f"🔮 {forecast_mode} Forecast Results")
 
+        # Convert to user timezone
+        user_tz = pytz.timezone('Asia/Karachi')
+        combined_df_display = combined_df.copy()
+        forecast_display_df = st.session_state.forecast.copy()
+        combined_df_display['ds'] = combined_df_display['ds'].dt.tz_localize('UTC').dt.tz_convert(user_tz)
+        forecast_display_df['ds'] = forecast_display_df['ds'].dt.tz_localize('UTC').dt.tz_convert(user_tz)
+
+        # Filter historical data to last 30 minutes for zoom
+        now_tz = datetime.now(pytz.utc).astimezone(user_tz)
+        combined_df_display = combined_df_display[combined_df_display['ds'] > now_tz - timedelta(minutes=30)]
+
         # Create main chart
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=combined_df['ds'], y=combined_df['y'],
+        fig.add_trace(go.Scatter(x=combined_df_display['ds'], y=combined_df_display['y'],
                                  name='Historical Data', line=dict(color='#636EFA')))
-        fig.add_trace(go.Scatter(x=st.session_state.forecast['ds'],
-                                 y=st.session_state.forecast['yhat'],
+        fig.add_trace(go.Scatter(x=forecast_display_df['ds'],
+                                 y=forecast_display_df['yhat'],
                                  name='Predictions', line=dict(color='#FFA15A')))
         fig.update_layout(
             title=f"{selected_pair} Price Trajectory",
-            xaxis_title="Date/Time (UTC)",
+            xaxis_title="Date/Time (PKT)",
             yaxis_title="Price (USD)",
             hovermode="x unified",
             height=500
         )
+        fig.update_xaxes(tickformat='%H:%M<br>%d/%m')
         st.plotly_chart(fig, use_container_width=True)
 
         # Create forecast breakdown
@@ -179,11 +208,11 @@ def main():
 
         with col1:
             st.markdown("### Prediction Details")
-            latest_pred = st.session_state.forecast.iloc[-1]
-            current_time = datetime.now().strftime("%H:%M UTC")
+            latest_pred = forecast_display_df.iloc[-1]
+            current_time = datetime.now(pytz.utc).astimezone(user_tz).strftime("%H:%M PKT")
 
-            if st.session_state.forecast_type == "Next Hour":
-                st.metric("Next Hour Prediction",
+            if st.session_state.forecast_type == "Next Interval":
+                st.metric("Next Interval Prediction",
                           f"${latest_pred['yhat']:.2f}",
                           delta=f"{(latest_pred['yhat'] - current_price):.2f} from now")
             else:
@@ -199,9 +228,9 @@ def main():
             st.progress(0.95, text="Prediction Confidence")
 
         # Detailed forecast table
-        st.subheader("📅 Hour-by-Hour Forecast")
-        forecast_display = st.session_state.forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(hours_ahead)
-        forecast_display['ds'] = forecast_display['ds'].dt.strftime('%Y-%m-%d %H:%M UTC')
+        st.subheader(f"📅 Forecast Breakdown ({st.session_state.selected_interval} intervals)")
+        forecast_display = forecast_display_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(st.session_state.periods)
+        forecast_display['ds'] = forecast_display['ds'].dt.strftime('%Y-%m-%d %H:%M PKT')
         st.dataframe(
             forecast_display.style.format({
                 'yhat': '{:.2f}',
@@ -209,7 +238,7 @@ def main():
                 'yhat_upper': '{:.2f}'
             }).applymap(lambda x: 'color: #FFA15A', subset=['yhat']),
             column_config={
-                'ds': 'Timestamp',
+                'ds': 'Timestamp (PKT)',
                 'yhat': 'Predicted Price',
                 'yhat_lower': 'Minimum Estimate',
                 'yhat_upper': 'Maximum Estimate'
