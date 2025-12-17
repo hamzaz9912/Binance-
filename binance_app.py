@@ -312,7 +312,8 @@ def main():
 
             st.dataframe(
                 market_df.style.format({'Current Price': '{:.8f}'}),
-                height=600
+                height=600,
+                width='stretch'
             )
 
         except Exception as e:
