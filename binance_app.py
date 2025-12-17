@@ -281,52 +281,24 @@ def main():
         st.cache_data.clear()
 
     # Market overview section with error handling
-    st.header("📊 Active USDT Trading Pairs")
+    st.header("📊 Live USDT Trading Pairs Prices")
     if client:
         try:
-            # Get 24-hour ticker data
-            tickers_24h = client.get_ticker()
-            market_df = pd.DataFrame(tickers_24h)
+            # Get live ticker data
+            all_tickers = client.get_all_tickers()
+            market_df = pd.DataFrame(all_tickers)
 
-            # Filter and clean data
-            market_df = market_df[market_df['symbol'].str.endswith('USDT')][[
-                'symbol', 'lastPrice', 'highPrice', 'lowPrice',
-                'priceChangePercent', 'volume', 'quoteVolume'
-            ]]
+            # Filter to USDT pairs
+            market_df = market_df[market_df['symbol'].str.endswith('USDT')]
 
-            # Rename and convert columns
-            market_df.columns = [
-                'Pair', 'Current Price', '24h High', '24h Low',
-                '24h Change (%)', 'Base Volume', 'Quote Volume'
-            ]
-            numeric_cols = ['Current Price', '24h High', '24h Low',
-                            '24h Change (%)', 'Base Volume', 'Quote Volume']
-            market_df[numeric_cols] = market_df[numeric_cols].apply(pd.to_numeric, errors='coerce')
+            # Rename columns
+            market_df.columns = ['Pair', 'Current Price']
 
-            # Add safe status calculation
-            def calculate_status(row):
-                try:
-                    if row['24h High'] == 0 or row['24h Low'] == 0:
-                        return 'Invalid Data'
-                    high_ratio = row['Current Price'] / row['24h High']
-                    low_ratio = row['Current Price'] / row['24h Low']
-                    if high_ratio > 0.98: return 'Near High'
-                    if low_ratio < 1.02: return 'Near Low'
-                    return 'Mid Range'
-                except:
-                    return 'N/A'
+            # Convert to numeric
+            market_df['Current Price'] = pd.to_numeric(market_df['Current Price'], errors='coerce')
 
-            market_df['Status'] = market_df.apply(calculate_status, axis=1)
-
-            # Filter out invalid data
-            market_df = market_df[
-                (market_df['24h High'] > 0) &
-                (market_df['24h Low'] > 0) &
-                (market_df['Status'] != 'Invalid Data')
-                ]
-
-            # Sort and format
-            market_df = market_df.sort_values('Quote Volume', ascending=False)
+            # Sort by price descending
+            market_df = market_df.sort_values('Current Price', ascending=False)
 
             # Search and display
             search = st.text_input("🔍 Search pairs:")
@@ -334,25 +306,15 @@ def main():
                 market_df = market_df[market_df['Pair'].str.contains(search.upper())]
 
             st.dataframe(
-                market_df.style.format({
-                    'Current Price': '{:.8f}',
-                    '24h High': '{:.8f}',
-                    '24h Low': '{:.8f}',
-                    '24h Change (%)': '{:.2f}%',
-                    'Quote Volume': '${:,.2f}'
-                }).background_gradient(subset=['24h Change (%)'], cmap='RdYlGn')
-                .map(lambda x: 'color: #2ecc71' if 'High' in str(x)
-                else 'color: #e74c3c' if 'Low' in str(x)
-                else '', subset=['Status'])
-                .bar(subset=['Quote Volume'], color='#3498db'),
+                market_df.style.format({'Current Price': '{:.8f}'}),
                 height=600,
                 width='stretch'
             )
 
         except Exception as e:
-            st.error(f"Error loading market data: {str(e)}")
+            st.error(f"Error loading live market data: {str(e)}")
     else:
-        st.info("Market data not available due to API connection issue")
+        st.info("Live market data not available due to API connection issue")
 
 if __name__ == "__main__":
     main()
