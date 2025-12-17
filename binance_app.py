@@ -286,6 +286,9 @@ def main():
         try:
             # Get live ticker data
             all_tickers = client.get_all_tickers()
+            if not isinstance(all_tickers, list):
+                st.error("API returned an error response. Please check your API keys and account permissions.")
+                return
             market_df = pd.DataFrame(all_tickers)
 
             # Filter to USDT pairs
