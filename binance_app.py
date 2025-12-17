@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.graph_objs as go
 from prophet import Prophet
 from binance.client import Client
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import threading
 import queue
 from websocket import WebSocketApp
@@ -70,9 +70,9 @@ def get_usdt_pairs():
 @st.cache_data(ttl=300)
 def get_historical_data(symbol, interval):
     try:
-        klines = client.get_historical_klines(symbol, interval, "2 days ago UTC")
+        klines = client.get_historical_klines(symbol, interval, "30 days ago UTC")
         return pd.DataFrame([(datetime.utcfromtimestamp(k[0] / 1000), float(k[4]))
-                             for k in klines], columns=['ds', 'y'])
+                              for k in klines], columns=['ds', 'y'])
     except:
         return pd.DataFrame()
 
@@ -81,13 +81,18 @@ def get_historical_data(symbol, interval):
 # Forecasting Functions
 # -------------------------------
 def generate_forecast(data, periods, freq):
-    try:
-        model = Prophet(daily_seasonality=True, weekly_seasonality=True)
-        model.fit(data)
-        future = model.make_future_dataframe(periods=periods, freq=freq)
-        return model.predict(future)
-    except:
-        return pd.DataFrame()
+    forecasts = []
+    scales = [0.1, 0.3, 0.5, 0.7, 0.9]  # Different changepoint priors for varied forecasts
+    for scale in scales:
+        try:
+            model = Prophet(daily_seasonality=True, weekly_seasonality=True, seasonality_mode='multiplicative', changepoint_prior_scale=scale)
+            model.fit(data)
+            future = model.make_future_dataframe(periods=periods, freq=freq)
+            forecast = model.predict(future)
+            forecasts.append(forecast)
+        except:
+            forecasts.append(pd.DataFrame())
+    return forecasts
 
 
 # -------------------------------
@@ -152,23 +157,25 @@ def main():
         min_date = datetime.now() + timedelta(hours=1)
         max_date = datetime.now() + timedelta(days=14)
         selected_date = st.sidebar.date_input("Select Target Date",
-                                              min_value=min_date,
-                                              max_value=max_date)
+                                               min_value=min_date,
+                                               max_value=max_date)
         hours_ahead = int((selected_date - datetime.now().date()).days * 24)
         hours_ahead += (23 - datetime.now().hour)  # Adjust for current hour
         periods = int(hours_ahead * 60 / selected_interval["minutes"])
         freq = selected_interval["freq"]
     else:
-        periods = selected_interval["minutes"]
-        freq = '1min'
-        selected_date = datetime.now() + timedelta(minutes=selected_interval["minutes"])
+        periods = 10  # Forecast next 10 intervals for detailed prediction line
+        freq = selected_interval["freq"]
+        selected_date = datetime.now() + timedelta(minutes=selected_interval["minutes"] * periods)
 
     # Generate forecasts
     if not combined_df.empty and st.sidebar.button("Generate Predictions"):
         with st.spinner("Crunching numbers..."):
-            forecast_df = generate_forecast(combined_df, periods, freq)
-            if not forecast_df.empty:
-                st.session_state.forecast = forecast_df
+            forecasts = generate_forecast(combined_df, periods, freq)
+            if not all(f.empty for f in forecasts):
+                st.session_state.forecasts = forecasts
+                st.session_state.forecast = forecasts[2]  # Use middle forecast for table
+                st.session_state.combined_df = combined_df
                 st.session_state.forecast_type = forecast_mode
                 st.session_state.target_date = selected_date
                 st.session_state.selected_interval = selected_interval_label
@@ -178,33 +185,46 @@ def main():
     if 'forecast' in st.session_state:
         st.header(f"🔮 {forecast_mode} Forecast Results")
 
-        # Convert to user timezone
+        # Prepare data
         user_tz = pytz.timezone('Asia/Karachi')
-        combined_df_display = combined_df.copy()
-        forecast_display_df = st.session_state.forecast.copy()
-        combined_df_display['ds'] = combined_df_display['ds'].dt.tz_localize('UTC').dt.tz_convert(user_tz)
+        now_tz = datetime.now(pytz.utc).astimezone(user_tz)
+        combined_display = st.session_state.combined_df.copy()
+        combined_display['ds'] = pd.to_datetime(combined_display['ds'])
+        if combined_display['ds'].dt.tz is None:
+            combined_display['ds'] = combined_display['ds'].dt.tz_localize('UTC').dt.tz_convert(user_tz)
+        combined_display['ds'] = combined_display['ds'].dt.tz_convert(user_tz)
+        forecast_display_df = st.session_state.forecast.tail(st.session_state.periods).copy()
         forecast_display_df['ds'] = forecast_display_df['ds'].dt.tz_localize('UTC').dt.tz_convert(user_tz)
 
-        # Filter historical data to last 30 minutes for zoom
-        now_tz = datetime.now(pytz.utc).astimezone(user_tz)
-        combined_df_display = combined_df_display[combined_df_display['ds'] > now_tz - timedelta(minutes=30)]
-
-        # Create main chart
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=combined_df_display['ds'], y=combined_df_display['y'],
-                                 name='Historical Data', line=dict(color='#636EFA')))
-        fig.add_trace(go.Scatter(x=forecast_display_df['ds'],
-                                 y=forecast_display_df['yhat'],
-                                 name='Predictions', line=dict(color='#FFA15A')))
-        fig.update_layout(
-            title=f"{selected_pair} Price Trajectory",
-            xaxis_title="Date/Time (PKT)",
+        # Historical chart
+        st.subheader("📈 Historical Price Chart")
+        hist_fig = go.Figure()
+        hist_fig.add_trace(go.Scatter(x=combined_display['ds'], y=combined_display['y'], name='Historical Prices', line=dict(color='blue')))
+        hist_fig.update_layout(
+            title=f"{selected_pair} Historical Prices",
+            xaxis_title="Time (PKT)",
             yaxis_title="Price (USD)",
             hovermode="x unified",
-            height=500
+            height=400
         )
-        fig.update_xaxes(tickformat='%H:%M<br>%d/%m')
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(hist_fig, width='stretch')
+
+        # Forecast chart
+        st.subheader("🔮 Forecast Chart")
+        forecast_fig = go.Figure()
+        # Show only Forecast 1
+        if st.session_state.forecasts and not st.session_state.forecasts[0].empty:
+            f_df = st.session_state.forecasts[0].tail(st.session_state.periods).copy()
+            f_df['ds'] = f_df['ds'].dt.tz_localize('UTC').dt.tz_convert(user_tz)
+            forecast_fig.add_trace(go.Scatter(x=f_df['ds'], y=f_df['yhat'], name='Forecast', line=dict(color='#FFA15A', width=2)))
+        forecast_fig.update_layout(
+            title=f"{selected_pair} Price Forecast",
+            xaxis_title="Time (PKT)",
+            yaxis_title="Price (USD)",
+            hovermode="x unified",
+            height=400
+        )
+        st.plotly_chart(forecast_fig, width='stretch')
 
         # Create forecast breakdown
         st.subheader("📈 Forecast Breakdown")
@@ -233,21 +253,21 @@ def main():
 
         # Detailed forecast table
         st.subheader(f"📅 Forecast Breakdown ({st.session_state.selected_interval} intervals)")
-        forecast_display = forecast_display_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(st.session_state.periods)
-        forecast_display['ds'] = forecast_display['ds'].dt.strftime('%Y-%m-%d %H:%M PKT')
+        forecast_display = forecast_display_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
+        forecast_display.loc[:, 'ds'] = forecast_display['ds'].dt.strftime('%Y-%m-%d %H:%M')
         st.dataframe(
             forecast_display.style.format({
                 'yhat': '{:.2f}',
                 'yhat_lower': '{:.2f}',
                 'yhat_upper': '{:.2f}'
-            }).applymap(lambda x: 'color: #FFA15A', subset=['yhat']),
+            }).map(lambda x: 'color: #FFA15A', subset=['yhat']),
             column_config={
                 'ds': 'Timestamp (PKT)',
                 'yhat': 'Predicted Price',
                 'yhat_lower': 'Minimum Estimate',
                 'yhat_upper': 'Maximum Estimate'
             },
-            use_container_width=True,
+            width='stretch',
             height=400
         )
 
@@ -321,12 +341,12 @@ def main():
                     '24h Change (%)': '{:.2f}%',
                     'Quote Volume': '${:,.2f}'
                 }).background_gradient(subset=['24h Change (%)'], cmap='RdYlGn')
-                .applymap(lambda x: 'color: #2ecc71' if 'High' in str(x)
+                .map(lambda x: 'color: #2ecc71' if 'High' in str(x)
                 else 'color: #e74c3c' if 'Low' in str(x)
                 else '', subset=['Status'])
                 .bar(subset=['Quote Volume'], color='#3498db'),
                 height=600,
-                use_container_width=True
+                width='stretch'
             )
 
         except Exception as e:
