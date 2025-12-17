@@ -144,6 +144,10 @@ def main():
     forecast_mode = st.sidebar.radio("Forecast Type",
                                       ["Next Interval", "Custom Date"])
 
+    if st.sidebar.button("Refresh Data"):
+        st.cache_data.clear()
+        st.rerun()
+
     if forecast_mode == "Custom Date":
         min_date = datetime.now() + timedelta(hours=1)
         max_date = datetime.now() + timedelta(days=14)
@@ -155,8 +159,8 @@ def main():
         periods = int(hours_ahead * 60 / selected_interval["minutes"])
         freq = selected_interval["freq"]
     else:
-        periods = max(1, selected_interval["minutes"] // 5)
-        freq = '5min'
+        periods = selected_interval["minutes"]
+        freq = '1min'
         selected_date = datetime.now() + timedelta(minutes=selected_interval["minutes"])
 
     # Generate forecasts
@@ -249,6 +253,10 @@ def main():
 
     # Market overview
     st.sidebar.subheader("Market Overview")
+    auto_refresh_market = st.sidebar.checkbox("Auto Refresh Market Data")
+    if auto_refresh_market:
+        st.cache_data.clear()  # Clear cache to refresh data
+
     if st.sidebar.button("Refresh Market Data"):
         st.cache_data.clear()
 
