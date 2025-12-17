@@ -294,11 +294,13 @@ def main():
             # Rename columns
             market_df.columns = ['Pair', 'Current Price']
 
-            # Convert to numeric
+            # Convert to numeric and handle errors
             market_df['Current Price'] = pd.to_numeric(market_df['Current Price'], errors='coerce')
+            market_df = market_df.dropna(subset=['Current Price'])
+            market_df['Current Price'] = market_df['Current Price'].astype(float)
 
-            # Sort by price descending
-            market_df = market_df.sort_values('Current Price', ascending=False)
+            # Sort by price descending and limit to top 100 for performance
+            market_df = market_df.sort_values('Current Price', ascending=False).head(100)
 
             # Search and display
             search = st.text_input("🔍 Search pairs:")
