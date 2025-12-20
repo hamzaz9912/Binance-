@@ -9,6 +9,8 @@ import queue
 from websocket import WebSocketApp
 import json
 import pytz
+from metaapi_cloud_sdk import MetaApi
+import asyncio
 
 # -------------------------------
 # Initialization
@@ -29,6 +31,19 @@ def init_binance_client():
 
 
 client = init_binance_client()
+
+# Initialize MetaApi client
+def init_metaapi_client():
+    try:
+        token = st.secrets["metaapi"]["token"]
+        account_id = st.secrets["metaapi"]["account_id"]
+        # Return token and account_id, create api in functions to handle async
+        return token, account_id
+    except KeyError:
+        st.error("MetaAPI secrets not configured")
+        return None, None
+
+metaapi_token, account_id = init_metaapi_client()
 
 # -------------------------------
 # WebSocket Management
@@ -68,13 +83,42 @@ def get_usdt_pairs():
 
 
 @st.cache_data(ttl=300)
-def get_historical_data(symbol, interval):
-    try:
-        klines = client.get_historical_klines(symbol, interval, "30 days ago UTC")
-        return pd.DataFrame([(datetime.utcfromtimestamp(k[0] / 1000), float(k[4]))
-                              for k in klines], columns=['ds', 'y'])
-    except:
-        return pd.DataFrame()
+def get_historical_data(symbol, interval, _client, asset_type):
+    if asset_type == "Crypto":
+        try:
+            klines = _client.get_historical_klines(symbol, interval, "30 days ago UTC")
+            return pd.DataFrame([(datetime.utcfromtimestamp(k[0] / 1000), float(k[4]))
+                                   for k in klines], columns=['ds', 'y'])
+        except:
+            return pd.DataFrame()
+    else:  # Forex or Gold
+        try:
+            async def get_data():
+                api = MetaApi(_client)
+                account = await api.metatrader_account_api.get_account(account_id)
+                connection = account.get_rpc_connection()
+                await connection.connect()
+                await connection.wait_synchronized()
+                # Map interval to timeframe
+                if interval == Client.KLINE_INTERVAL_5MINUTE:
+                    tf = '5m'
+                elif interval == Client.KLINE_INTERVAL_15MINUTE:
+                    tf = '15m'
+                elif interval == Client.KLINE_INTERVAL_1HOUR:
+                    tf = '1h'
+                elif interval == Client.KLINE_INTERVAL_4HOUR:
+                    tf = '4h'
+                elif interval == Client.KLINE_INTERVAL_1DAY:
+                    tf = '1d'
+                else:
+                    tf = '1h'
+                # Get candles for last 30 days
+                from_date = datetime.utcnow() - timedelta(days=30)
+                candles = await connection.get_historical_candles(symbol, tf, from_date.isoformat() + 'Z', None, 1000)
+                return pd.DataFrame([(datetime.fromisoformat(c['time'][:-1]), c['close']) for c in candles], columns=['ds', 'y'])
+            return asyncio.run(get_data())
+        except:
+            return pd.DataFrame()
 
 
 # -------------------------------
@@ -99,12 +143,25 @@ def generate_forecast(data, periods, freq):
 # Main App
 # -------------------------------
 def main():
-    st.title("⏳ Multi-Timeframe Crypto Predictor")
+    st.title("⏳ Multi-Timeframe Asset Predictor")
 
     # Sidebar controls
     st.sidebar.header("Configuration")
-    pairs = get_usdt_pairs()
-    default_index = pairs.index('BTCUSDT') if 'BTCUSDT' in pairs else 0
+    asset_type = st.sidebar.selectbox("Asset Type", ["Crypto", "Forex", "Gold"])
+
+    if asset_type == "Crypto":
+        pairs = get_usdt_pairs()
+        current_client = client
+        default_index = pairs.index('BTCUSDT') if 'BTCUSDT' in pairs else 0
+    elif asset_type == "Forex":
+        pairs = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF"]
+        current_client = metaapi_token
+        default_index = 0
+    elif asset_type == "Gold":
+        pairs = ["XAUUSD"]
+        current_client = metaapi_token
+        default_index = 0
+
     selected_pair = st.sidebar.selectbox("Choose Asset", pairs, index=default_index)
 
     # Time interval selection
@@ -118,17 +175,19 @@ def main():
     selected_interval_label = st.sidebar.selectbox("Time Interval", list(interval_options.keys()), index=2)  # Default to 1 Hour
     selected_interval = interval_options[selected_interval_label]
 
-    # WebSocket management
-    if 'current_pair' not in st.session_state or st.session_state.current_pair != selected_pair:
-        manage_websocket(selected_pair)
-        st.session_state.current_pair = selected_pair
-        price_queue.queue.clear()
+    # WebSocket management for Crypto
+    if asset_type == "Crypto":
+        if 'current_pair' not in st.session_state or st.session_state.current_pair != selected_pair:
+            manage_websocket(selected_pair)
+            st.session_state.current_pair = selected_pair
+            price_queue.queue.clear()
 
     # Get combined data
-    hist_data = get_historical_data(selected_pair, selected_interval["binance"])
+    hist_data = get_historical_data(selected_pair, selected_interval["binance"], current_client, asset_type)
     live_data = []
-    while not price_queue.empty():
-        live_data.append(price_queue.get())
+    if asset_type == "Crypto":
+        while not price_queue.empty():
+            live_data.append(price_queue.get())
 
     if live_data:
         live_df = pd.DataFrame(live_data, columns=['ds', 'y'])
@@ -136,6 +195,25 @@ def main():
         combined_df = pd.concat([hist_data, live_df]).drop_duplicates('ds').sort_values('ds')
     else:
         combined_df = hist_data
+
+    # For Forex/Gold, add current tick
+    if asset_type != "Crypto" and current_client:
+        try:
+            async def get_price():
+                api = MetaApi(current_client)
+                account = await api.metatrader_account_api.get_account(account_id)
+                connection = account.get_rpc_connection()
+                await connection.connect()
+                await connection.wait_synchronized()
+                price = await connection.get_symbol_price(selected_pair)
+                return price['bid']
+            live_price = asyncio.run(get_price())
+            live_timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            live_df = pd.DataFrame([[live_timestamp, live_price]], columns=['ds', 'y'])
+            live_df['ds'] = pd.to_datetime(live_df['ds'])
+            combined_df = pd.concat([combined_df, live_df]).drop_duplicates('ds').sort_values('ds')
+        except:
+            pass
 
     # Real-time price display
     current_price = combined_df['y'].iloc[-1] if not combined_df.empty else None
@@ -236,13 +314,15 @@ def main():
             current_time = datetime.now(pytz.utc).astimezone(user_tz).strftime("%H:%M PKT")
 
             if st.session_state.forecast_type == "Next Interval":
+                delta_value = f"{(latest_pred['yhat'] - current_price):.2f} from now" if current_price is not None else "N/A"
                 st.metric("Next Interval Prediction",
                           f"${latest_pred['yhat']:.2f}",
-                          delta=f"{(latest_pred['yhat'] - current_price):.2f} from now")
+                          delta=delta_value)
             else:
+                delta_value = f"{(latest_pred['yhat'] - current_price):.2f} projected change" if current_price is not None else "N/A"
                 st.metric(f"{selected_date.strftime('%Y-%m-%d')} Prediction",
                           f"${latest_pred['yhat']:.2f}",
-                          delta=f"{(latest_pred['yhat'] - current_price):.2f} projected change")
+                          delta=delta_value)
 
         with col2:
             st.markdown("### Confidence Range")
@@ -271,55 +351,56 @@ def main():
             height=400
         )
 
-    # Market overview
-    st.sidebar.subheader("Market Overview")
-    auto_refresh_market = st.sidebar.checkbox("Auto Refresh Market Data")
-    if auto_refresh_market:
-        st.cache_data.clear()  # Clear cache to refresh data
+    if asset_type == "Crypto":
+        # Market overview
+        st.sidebar.subheader("Market Overview")
+        auto_refresh_market = st.sidebar.checkbox("Auto Refresh Market Data")
+        if auto_refresh_market:
+            st.cache_data.clear()  # Clear cache to refresh data
 
-    if st.sidebar.button("Refresh Market Data"):
-        st.cache_data.clear()
+        if st.sidebar.button("Refresh Market Data"):
+            st.cache_data.clear()
 
-    # Market overview section with error handling
-    st.header("📊 Live USDT Trading Pairs Prices")
-    if client:
-        try:
-            # Get live ticker data
-            all_tickers = client.get_all_tickers()
-            if not isinstance(all_tickers, list):
-                st.error("API returned an error response. Please check your API keys and account permissions.")
-                return
-            market_df = pd.DataFrame(all_tickers)
+        # Market overview section with error handling
+        st.header("📊 Live USDT Trading Pairs Prices")
+        if client:
+            try:
+                # Get live ticker data
+                all_tickers = client.get_all_tickers()
+                if not isinstance(all_tickers, list):
+                    st.error("API returned an error response. Please check your API keys and account permissions.")
+                    return
+                market_df = pd.DataFrame(all_tickers)
 
-            # Filter to USDT pairs
-            market_df = market_df[market_df['symbol'].str.endswith('USDT')]
+                # Filter to USDT pairs
+                market_df = market_df[market_df['symbol'].str.endswith('USDT')]
 
-            # Rename columns
-            market_df.columns = ['Pair', 'Current Price']
+                # Rename columns
+                market_df.columns = ['Pair', 'Current Price']
 
-            # Convert to numeric and handle errors
-            market_df['Current Price'] = pd.to_numeric(market_df['Current Price'], errors='coerce')
-            market_df = market_df.dropna(subset=['Current Price'])
-            market_df['Current Price'] = market_df['Current Price'].astype(float)
+                # Convert to numeric and handle errors
+                market_df['Current Price'] = pd.to_numeric(market_df['Current Price'], errors='coerce')
+                market_df = market_df.dropna(subset=['Current Price'])
+                market_df['Current Price'] = market_df['Current Price'].astype(float)
 
-            # Sort by price descending and limit to top 100 for performance
-            market_df = market_df.sort_values('Current Price', ascending=False).head(100)
+                # Sort by price descending and limit to top 100 for performance
+                market_df = market_df.sort_values('Current Price', ascending=False).head(100)
 
-            # Search and display
-            search = st.text_input("🔍 Search pairs:")
-            if search:
-                market_df = market_df[market_df['Pair'].str.contains(search.upper())]
+                # Search and display
+                search = st.text_input("🔍 Search pairs:")
+                if search:
+                    market_df = market_df[market_df['Pair'].str.contains(search.upper())]
 
-            st.dataframe(
-                market_df.style.format({'Current Price': '{:.8f}'}),
-                height=600,
-                width='stretch'
-            )
+                st.dataframe(
+                    market_df.style.format({'Current Price': '{:.8f}'}),
+                    height=600,
+                    width='stretch'
+                )
 
-        except Exception as e:
-            st.error(f"Error loading live market data: {str(e)}")
-    else:
-        st.info("Live market data not available due to API connection issue")
+            except Exception as e:
+                st.error(f"Error loading live market data: {str(e)}")
+        else:
+            st.info("Live market data not available due to API connection issue")
 
 if __name__ == "__main__":
     main()
