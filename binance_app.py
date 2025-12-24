@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objs as go
 from prophet import Prophet
-from binance.client import Client
+from binance.spot import Spot as Client
 from datetime import datetime, timedelta, timezone
 import threading
 import queue
@@ -75,7 +75,7 @@ def manage_websocket(symbol):
 @st.cache_data(ttl=3600)
 def get_usdt_pairs():
     try:
-        info = client.get_exchange_info()
+        info = client.exchange_info()
         return sorted([s['symbol'] for s in info['symbols']
                        if s['quoteAsset'] == 'USDT' and s['status'] == 'TRADING'])
     except:
@@ -86,7 +86,7 @@ def get_usdt_pairs():
 def get_historical_data(symbol, interval, _client, asset_type):
     if asset_type == "Crypto":
         try:
-            klines = _client.get_historical_klines(symbol, interval, "30 days ago UTC")
+            klines = _client.klines(symbol, interval, startTime=int((datetime.utcnow() - timedelta(days=30)).timestamp() * 1000))
             return pd.DataFrame([(datetime.utcfromtimestamp(k[0] / 1000), float(k[4]))
                                    for k in klines], columns=['ds', 'y'])
         except:
@@ -100,15 +100,15 @@ def get_historical_data(symbol, interval, _client, asset_type):
                 await connection.connect()
                 await connection.wait_synchronized()
                 # Map interval to timeframe
-                if interval == Client.KLINE_INTERVAL_5MINUTE:
+                if interval == "5m":
                     tf = '5m'
-                elif interval == Client.KLINE_INTERVAL_15MINUTE:
+                elif interval == "15m":
                     tf = '15m'
-                elif interval == Client.KLINE_INTERVAL_1HOUR:
+                elif interval == "1h":
                     tf = '1h'
-                elif interval == Client.KLINE_INTERVAL_4HOUR:
+                elif interval == "4h":
                     tf = '4h'
-                elif interval == Client.KLINE_INTERVAL_1DAY:
+                elif interval == "1d":
                     tf = '1d'
                 else:
                     tf = '1h'
@@ -166,11 +166,11 @@ def main():
 
     # Time interval selection
     interval_options = {
-        "5 Minutes": {"binance": Client.KLINE_INTERVAL_5MINUTE, "freq": "5min", "minutes": 5},
-        "15 Minutes": {"binance": Client.KLINE_INTERVAL_15MINUTE, "freq": "15min", "minutes": 15},
-        "1 Hour": {"binance": Client.KLINE_INTERVAL_1HOUR, "freq": "H", "minutes": 60},
-        "4 Hours": {"binance": Client.KLINE_INTERVAL_4HOUR, "freq": "4H", "minutes": 240},
-        "1 Day": {"binance": Client.KLINE_INTERVAL_1DAY, "freq": "D", "minutes": 1440}
+        "5 Minutes": {"binance": "5m", "freq": "5min", "minutes": 5},
+        "15 Minutes": {"binance": "15m", "freq": "15min", "minutes": 15},
+        "1 Hour": {"binance": "1h", "freq": "H", "minutes": 60},
+        "4 Hours": {"binance": "4h", "freq": "4H", "minutes": 240},
+        "1 Day": {"binance": "1d", "freq": "D", "minutes": 1440}
     }
     selected_interval_label = st.sidebar.selectbox("Time Interval", list(interval_options.keys()), index=2)  # Default to 1 Hour
     selected_interval = interval_options[selected_interval_label]
@@ -314,15 +314,13 @@ def main():
             current_time = datetime.now(pytz.utc).astimezone(user_tz).strftime("%H:%M PKT")
 
             if st.session_state.forecast_type == "Next Interval":
-                delta_value = f"{(latest_pred['yhat'] - current_price):.2f} from now" if current_price is not None else "N/A"
                 st.metric("Next Interval Prediction",
                           f"${latest_pred['yhat']:.2f}",
-                          delta=delta_value)
+                          delta=f"{(latest_pred['yhat'] - current_price):.2f} from now")
             else:
-                delta_value = f"{(latest_pred['yhat'] - current_price):.2f} projected change" if current_price is not None else "N/A"
                 st.metric(f"{selected_date.strftime('%Y-%m-%d')} Prediction",
                           f"${latest_pred['yhat']:.2f}",
-                          delta=delta_value)
+                          delta=f"{(latest_pred['yhat'] - current_price):.2f} projected change")
 
         with col2:
             st.markdown("### Confidence Range")
@@ -366,7 +364,7 @@ def main():
         if client:
             try:
                 # Get live ticker data
-                all_tickers = client.get_all_tickers()
+                all_tickers = client.ticker_price()
                 if not isinstance(all_tickers, list):
                     st.error("API returned an error response. Please check your API keys and account permissions.")
                     return
